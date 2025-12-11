@@ -651,7 +651,8 @@ def load_model():
     return {'grid_logistic': grid_logistic, 'df': df, 
             'feature_cols_team_inc': feature_cols_team_inc, 
             'feature_cols_players_inc': feature_cols_players_inc,
-            'scaler': scaler}
+            'scaler': scaler, 
+            'mapping': team_mapping}
 
 resources = load_model()
 grid_logistic = resources['grid_logistic']
@@ -659,6 +660,7 @@ df = resources['df']
 feature_cols_team_inc = resources['feature_cols_team_inc']
 feature_cols_players_inc = resources['feature_cols_players_inc']
 scaler = resources['scaler']
+mapping = resources['mapping']
 
 
 conference_teams = ['goucher',
@@ -671,6 +673,7 @@ conference_teams = ['goucher',
     'moravian',
     'lycoming',
     'wilkes']
+
 
 
 # Function to predict winner of matchup; returns True for home wins, False for Away wins
@@ -712,13 +715,26 @@ def predict(model, home_team_name, away_team_name):
 # =======================
 # STREAMLIT APP
 # =======================
-
-
+# Win Prediction Section
 st.title("🏀 Basketball Winner Predictor")
 st.write("Select two teams to predict the game outcome based on rolling 5-game stats.")
 
 teamA = st.selectbox("Home Team", conference_teams, key="teamA")
 teamB = st.selectbox("Away Team", conference_teams, key="teamB")
+
+# Get most recent rows
+home_stats = df[df['Team']==teamA].sort_values(by='Date').iloc[-1:][feature_cols_team_inc + feature_cols_players_inc]
+away_stats = df[df['Team']==teamB].sort_values(by='Date').iloc[-1:][feature_cols_team_inc + feature_cols_players_inc]
+
+# Split & rename stats
+home_team_stats  = home_stats[feature_cols_team_inc].rename(columns=lambda c: f"{c}_A")
+away_team_stats  = away_stats[feature_cols_team_inc].rename(columns=lambda c: f"{c}_B")
+
+ # Combine input
+X_in = pd.concat([
+    home_team_stats, 
+    away_team_stats
+], axis=1)
 
 if teamA == teamB:
     st.warning("Teams must be different.")
@@ -734,3 +750,101 @@ if st.button("Predict Winner"):
 
     st.subheader(f"🏆 Predicted Winner: **{team_winner}**")
 
+# Statistic Graph Section
+st.title("📊 Statistical Analysis")
+st.write("Show the statistics of the two teams or players.")
+
+with st.expander("Show Graphical Analysis", expanded=False):
+    st.subheader("Average Team Stats Comparison")
+    
+    # --- Compute averages for each team ---
+    def team_avg(df, team_name, cols):
+        subset = df[df['Team'] == team_name]
+        if subset.empty:
+            return pd.Series({c: np.nan for c in cols})
+        available = [c for c in cols if c in subset.columns]
+        avg = subset[available].mean()
+        return avg.reindex(cols)
+
+    teamA_stats = team_avg(df, teamA, feature_cols_team_inc)
+    teamB_stats = team_avg(df, teamB, feature_cols_team_inc)
+
+    comparison_df = pd.DataFrame({
+        'Stat': feature_cols_team_inc,
+        teamA: teamA_stats.values,
+        teamB: teamB_stats.values
+    }).dropna(how='all')
+
+    # --- Readable labels ---
+    label_map = {
+        'PTS_rolling_5': 'Points',
+        'REB_rolling_5': 'Rebounds',
+        'A_rolling_5': 'Assists',
+        'TO_rolling_5': 'Turnovers',
+        'STL_rolling_5': 'Steals',
+        'BLK_rolling_5': 'Blocks',
+        'PF_rolling_5': 'Fouls',
+        'FG%_rolling_5': 'Field Goal %',
+        '3PT%_rolling_5': '3PT %',
+        'FT%_rolling_5': 'Free Throw %',
+        'ORB_rolling_5': 'Off. Rebounds',
+        'DRB_rolling_5': 'Def. Rebounds',
+        'is_win_rolling_5': 'Win % (last 5)'
+    }
+    comparison_df['Stat'] = comparison_df['Stat'].map(label_map)
+    
+    # --- Normalize percentage columns to 0–100 ---
+    percent_stats = ['Field Goal %', '3PT %', 'Free Throw %', 'Win % (last 5)']
+    for col in [teamA, teamB]:
+        comparison_df.loc[comparison_df['Stat'].isin(percent_stats), col] *= 100
+
+    # --- Grouped Bar Chart ---
+    fig_bar = px.bar(
+        comparison_df.melt(id_vars='Stat', var_name='Team', value_name='Average'),
+        x='Stat', y='Average', color='Team', barmode='group',
+        title=f"Average Stats: {teamA} vs {teamB}"
+    )
+    fig_bar.update_layout(xaxis_tickangle=-35)
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+# Recent Form Tracker Section
+st.title("📈 Recent Form Tracker")
+st.write("Track the last 5 games for each team.")
+
+with st.expander("Show Recent Form", expanded=False):
+    st.subheader("Average Team Stats Comparison")
+    # Helper function to get last 5 games
+    def recent_form(df, team_name):
+        subset = df[df['Team'] == team_name].sort_values('Date').tail(5)
+        # Keep key stats
+        return subset[['Date', 'PTS', 'REB', 'A', 'TO', 'STL', 'BLK', 'PF', 'is_win']]
+
+    teamA_form = recent_form(df, teamA)
+    teamB_form = recent_form(df, teamB)
+
+    # Display tables
+    st.subheader(f"📊 {teamA} - Last 5 Games")
+    st.dataframe(teamA_form)
+
+    st.subheader(f"📊 {teamB} - Last 5 Games")
+    st.dataframe(teamB_form)
+
+    # Plot win/loss trend
+    fig_trend = go.Figure()
+    fig_trend.add_trace(go.Scatter(
+        x=teamA_form['Date'], y=teamA_form['PTS'],
+        mode='lines+markers', name=f"{teamA} Points",
+        line=dict(color='blue')
+    ))
+    fig_trend.add_trace(go.Scatter(
+        x=teamB_form['Date'], y=teamB_form['PTS'],
+        mode='lines+markers', name=f"{teamB} Points",
+        line=dict(color='red')
+    ))
+    fig_trend.update_layout(
+        title=f"Points Trend (Last 5 Games): {teamA} vs {teamB}",
+        xaxis_title="Date",
+        yaxis_title="Points",
+        legend_title="Team"
+    )
+    st.plotly_chart(fig_trend, use_container_width=True) 
